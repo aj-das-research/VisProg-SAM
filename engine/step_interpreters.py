@@ -2,6 +2,7 @@ import cv2
 import os
 import torch
 import openai
+from openai import OpenAI
 import functools
 import numpy as np
 import face_detection
@@ -16,7 +17,11 @@ from transformers import (ViltProcessor, ViltForQuestionAnswering,
 from diffusers import StableDiffusionInpaintPipeline
 
 from .nms import nms
-from vis_utils import html_embed_image, html_colored_span, vis_masks
+from vis_utils import html_embed_image, html_colored_span, vis_masks, load_font
+
+# Patch broken model URL
+import face_detection.dsfd.detect
+face_detection.dsfd.detect.model_url = "https://huggingface.co/zixianma/mma/resolve/main/WIDERFace_DSFD_RES152.pth"
 
 
 def parse_step(step_str,partial=False):
@@ -99,8 +104,19 @@ class EvalInterpreter():
         if 'xor' in step_input:
             step_input = step_input.replace('xor','!=')
 
-        step_input = step_input.format(**prog_state)
-        step_output = eval(step_input)
+        step_input_formatted = step_input.format(**prog_state)
+        
+        try:
+            step_output = eval(step_input_formatted)
+        except TypeError:
+            # Fallback: convert all values in prog_step.state to repr strings to ensure they are treated as text
+            prog_state_retry = dict()
+            for var_name, var_value in prog_step.state.items():
+                prog_state_retry[var_name] = repr(str(var_value))
+            
+            step_input_formatted = step_input.format(**prog_state_retry)
+            step_output = eval(step_input_formatted)
+
         prog_step.state[output_var] = step_output
         if inspect:
             html_str = self.html(eval_expression, step_input, step_output, output_var)
@@ -1028,7 +1044,7 @@ List:"""
 
     def __init__(self):
         print(f'Registering {self.step_name} step')
-        openai.api_key = os.getenv("OPENAI_API_KEY")
+        self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
     def parse(self,prog_step):
         parse_result = parse_step(prog_step.prog_str)
@@ -1040,8 +1056,8 @@ List:"""
         return text,list_max,output_var
 
     def get_list(self,text,list_max):
-        response = openai.Completion.create(
-            model="text-davinci-002",
+        response = self.client.completions.create(
+            model="gpt-3.5-turbo-instruct",
             prompt=self.prompt_template.format(list_max=list_max,text=text),
             temperature=0.7,
             max_tokens=256,
@@ -1051,7 +1067,7 @@ List:"""
             n=1,
         )
 
-        item_list = response.choices[0]['text'].lstrip('\n').rstrip('\n').split(', ')
+        item_list = response.choices[0].text.lstrip('\n').rstrip('\n').split(', ')
         return item_list
 
     def html(self,text,list_max,item_list,output_var):
@@ -1207,14 +1223,16 @@ class TagInterpreter():
         W,H = img.size
         img1 = img.copy()
         draw = ImageDraw.Draw(img1)
-        font = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf', 16)
+        font = load_font(size=16)
         for i,obj in enumerate(objs):
             box = obj['box']
             draw.rectangle(box,outline='green',width=4)
             x1,y1,x2,y2 = box
             label = obj['class'] + '({})'.format(obj['class_score'])
             if 'class' in obj:
-                w,h = font.getsize(label)
+                left, top, right, bottom = font.getbbox(label)
+                w = right - left
+                h = bottom - top
                 if x1+w > W or y2+h > H:
                     draw.rectangle((x1, y2-h, x1 + w, y2), fill='green')
                     draw.text((x1,y2-h),label,fill='white',font=font)
@@ -1247,19 +1265,19 @@ class TagInterpreter():
 
 
 def dummy(images, **kwargs):
-    return images, False
+    return images, [False] * len(images)
 
 class ReplaceInterpreter():
     step_name = 'REPLACE'
 
     def __init__(self):
         print(f'Registering {self.step_name} step')
-        device = "cuda"
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        dtype = torch.float16 if torch.cuda.is_available() else torch.float32
         model_name = "runwayml/stable-diffusion-inpainting"
         self.pipe = StableDiffusionInpaintPipeline.from_pretrained(
             model_name,
-            revision="fp16",
-            torch_dtype=torch.float16)
+            torch_dtype=dtype)
         self.pipe = self.pipe.to(device)
         self.pipe.safety_checker = dummy
 

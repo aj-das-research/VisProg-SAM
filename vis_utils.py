@@ -6,7 +6,7 @@ import math
 
 def image_formatter(img_path,size=224,vertical_align='middle'):
     img = Image.open(img_path)
-    img.thumbnail((size,size), Image.ANTIALIAS)
+    img.thumbnail((size,size), Image.LANCZOS)
     with BytesIO() as buffer:
         img.save(buffer, 'jpeg')
         base64_img = base64.b64encode(buffer.getvalue()).decode()
@@ -40,6 +40,30 @@ def image_grid(imgs,rows,cols):
         grid.paste(img, box=(i%cols*w, i//cols*h))
     return grid
 
+def load_font(size=20):
+    try:
+        # Try common fonts that might be available
+        font_names = [
+            'arial.ttf',
+            'arialbd.ttf',
+            'calibri.ttf',
+            'seguiemj.ttf', # Windows emoji font
+            'DejaVuSansMono-Bold.ttf',
+            '/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf' 
+        ]
+        
+        for font_name in font_names:
+            try:
+                return ImageFont.truetype(font_name, size)
+            except OSError:
+                continue
+                
+        # If no specific font found, try default system font loading behavior of PIL
+        return ImageFont.truetype("arial", size) # Common fallback
+    except Exception:
+        # Ultimate fallback
+        return ImageFont.load_default()
+
 def vis_masks(img,objs,labels=None):
     if len(objs)==0:
         return Image.new('RGB',size=img.size)
@@ -53,7 +77,7 @@ def vis_masks(img,objs,labels=None):
         imgs.append(obj_img)
 
     if labels is not None:
-        font = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf', 60)
+        font = load_font(size=60)
         for img,label in zip(imgs,labels):
             canvas = ImageDraw.Draw(img)
             canvas.text((0,0),label,fill='white',font=font)
